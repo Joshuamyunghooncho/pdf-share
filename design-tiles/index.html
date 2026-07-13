@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>design tiles</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="style.css" />
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #f4f2ee;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    @media (prefers-color-scheme: dark) {
+      html, body { background: #111; }
+    }
+    #mount { padding: 2rem; max-width: 90vw; }
+  </style>
+</head>
+<body>
+  <div id="mount"></div>
+  <script type="module">
+    import { DesignTiles } from "./tiles.js";
+    const tiles = new DesignTiles(document.getElementById("mount"), {
+      words: ["design", "is", "how", "it", "works"],
+    });
+    tiles.start();
+  </script>
+</body>
+</html>
