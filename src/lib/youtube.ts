@@ -1,8 +1,12 @@
+import crewRoster from "@/data/crews.json";
+
 export type RankedVideo = {
   rank: number;
   videoId: string;
   title: string;
   channelTitle: string;
+  channelId: string;
+  country: string | null;
   thumbnailUrl: string;
   viewCount: number;
   publishedAt: string;
@@ -13,13 +17,23 @@ export type RankingsResult = {
   videos: RankedVideo[];
   weekStart: string;
   weekEnd: string;
+  crewCount: number;
   source: "youtube-api" | "mock";
   generatedAt: string;
 };
 
-const SEARCH_QUERY = '"kpop in public"';
-const MAX_RESULTS = 50;
 const RANKING_SIZE = 20;
+const CONCURRENCY = 10;
+
+type Crew = {
+  channelId: string;
+  channelTitle: string;
+  country: string | null;
+  thumbnailUrl: string;
+  uploadsPlaylistId: string;
+};
+
+const CREWS = crewRoster as Crew[];
 
 function isRelevantTitle(title: string, description: string) {
   const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -37,63 +51,92 @@ function getWeekRange() {
   return { weekStart, weekEnd };
 }
 
-async function fetchFromYouTube(apiKey: string): Promise<RankedVideo[]> {
-  const { weekStart } = getWeekRange();
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
 
-  const searchParams = new URLSearchParams({
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index]);
+    }
+  }
+
+  await Promise.all(new Array(Math.min(limit, items.length)).fill(0).map(worker));
+  return results;
+}
+
+type RecentUpload = { videoId: string; channelId: string };
+
+async function fetchRecentUploads(
+  apiKey: string,
+  crew: Crew,
+  weekStart: Date
+): Promise<RecentUpload[]> {
+  const params = new URLSearchParams({
     key: apiKey,
     part: "snippet",
-    q: SEARCH_QUERY,
-    type: "video",
-    order: "viewCount",
-    maxResults: String(MAX_RESULTS),
-    publishedAfter: weekStart.toISOString(),
-    safeSearch: "none",
+    playlistId: crew.uploadsPlaylistId,
+    maxResults: "10",
   });
 
-  const searchRes = await fetch(
-    `https://www.googleapis.com/youtube/v3/search?${searchParams.toString()}`,
+  const res = await fetch(
+    `https://www.googleapis.com/youtube/v3/playlistItems?${params.toString()}`,
     { next: { revalidate: 3600 } }
   );
 
-  if (!searchRes.ok) {
-    const body = await searchRes.text();
-    throw new Error(`YouTube search failed (${searchRes.status}): ${body}`);
-  }
-
-  const searchData = await searchRes.json();
-  const videoIds: string[] = (searchData.items ?? [])
-    .map((item: { id?: { videoId?: string } }) => item.id?.videoId)
-    .filter((id: string | undefined): id is string => Boolean(id));
-
-  if (videoIds.length === 0) {
+  if (!res.ok) {
+    console.error(`playlistItems failed for ${crew.channelTitle}: ${res.status}`);
     return [];
   }
 
-  const videosParams = new URLSearchParams({
-    key: apiKey,
-    part: "snippet,statistics",
-    id: videoIds.join(","),
-  });
+  const data = await res.json();
 
-  const videosRes = await fetch(
-    `https://www.googleapis.com/youtube/v3/videos?${videosParams.toString()}`,
-    { next: { revalidate: 3600 } }
+  type PlaylistItem = {
+    snippet: {
+      publishedAt: string;
+      resourceId: { videoId: string };
+    };
+  };
+
+  return (data.items ?? [])
+    .filter((item: PlaylistItem) => new Date(item.snippet.publishedAt) >= weekStart)
+    .map((item: PlaylistItem) => ({
+      videoId: item.snippet.resourceId.videoId,
+      channelId: crew.channelId,
+    }));
+}
+
+async function fetchFromCrewRoster(apiKey: string): Promise<RankedVideo[]> {
+  const { weekStart } = getWeekRange();
+
+  const uploadLists = await mapWithConcurrency(CREWS, CONCURRENCY, (crew) =>
+    fetchRecentUploads(apiKey, crew, weekStart)
   );
 
-  if (!videosRes.ok) {
-    const body = await videosRes.text();
-    throw new Error(`YouTube videos lookup failed (${videosRes.status}): ${body}`);
+  const uploads = uploadLists.flat();
+  if (uploads.length === 0) {
+    return [];
   }
 
-  const videosData = await videosRes.json();
+  const channelById = new Map(CREWS.map((c) => [c.channelId, c]));
+  const videoIds = uploads.map((u) => u.videoId);
+
+  const videoBatches: string[][] = [];
+  for (let i = 0; i < videoIds.length; i += 50) {
+    videoBatches.push(videoIds.slice(i, i + 50));
+  }
 
   type YouTubeVideoItem = {
     id: string;
     snippet: {
       title: string;
       description: string;
-      channelTitle: string;
+      channelId: string;
       publishedAt: string;
       thumbnails: {
         high?: { url: string };
@@ -106,27 +149,49 @@ async function fetchFromYouTube(apiKey: string): Promise<RankedVideo[]> {
     };
   };
 
-  const videos: RankedVideo[] = (videosData.items ?? [])
-    .filter((item: YouTubeVideoItem) =>
-      isRelevantTitle(item.snippet.title, item.snippet.description)
-    )
-    .map((item: YouTubeVideoItem) => ({
-      videoId: item.id,
-      title: item.snippet.title,
-      channelTitle: item.snippet.channelTitle,
-      thumbnailUrl:
-        item.snippet.thumbnails.high?.url ??
-        item.snippet.thumbnails.medium?.url ??
-        item.snippet.thumbnails.default?.url ??
-        "",
-      viewCount: Number(item.statistics.viewCount ?? 0),
-      publishedAt: item.snippet.publishedAt,
-      url: `https://www.youtube.com/watch?v=${item.id}`,
-      rank: 0,
-    }))
-    .sort((a: RankedVideo, b: RankedVideo) => b.viewCount - a.viewCount)
+  const items: YouTubeVideoItem[] = [];
+  for (const batch of videoBatches) {
+    const params = new URLSearchParams({
+      key: apiKey,
+      part: "snippet,statistics",
+      id: batch.join(","),
+    });
+    const res = await fetch(
+      `https://www.googleapis.com/youtube/v3/videos?${params.toString()}`,
+      { next: { revalidate: 3600 } }
+    );
+    if (!res.ok) {
+      console.error(`videos.list failed: ${res.status} ${await res.text()}`);
+      continue;
+    }
+    const data = await res.json();
+    items.push(...(data.items ?? []));
+  }
+
+  const videos: RankedVideo[] = items
+    .filter((item) => isRelevantTitle(item.snippet.title, item.snippet.description))
+    .map((item) => {
+      const crew = channelById.get(item.snippet.channelId);
+      return {
+        videoId: item.id,
+        title: item.snippet.title,
+        channelTitle: crew?.channelTitle ?? "Unknown",
+        channelId: item.snippet.channelId,
+        country: crew?.country ?? null,
+        thumbnailUrl:
+          item.snippet.thumbnails.high?.url ??
+          item.snippet.thumbnails.medium?.url ??
+          item.snippet.thumbnails.default?.url ??
+          "",
+        viewCount: Number(item.statistics.viewCount ?? 0),
+        publishedAt: item.snippet.publishedAt,
+        url: `https://www.youtube.com/watch?v=${item.id}`,
+        rank: 0,
+      };
+    })
+    .sort((a, b) => b.viewCount - a.viewCount)
     .slice(0, RANKING_SIZE)
-    .map((video: RankedVideo, index: number) => ({ ...video, rank: index + 1 }));
+    .map((video, index) => ({ ...video, rank: index + 1 }));
 
   return videos;
 }
@@ -185,11 +250,14 @@ function buildMockVideos(): RankedVideo[] {
       5000,
       Math.round(baseViews + (Math.random() - 0.5) * 150000)
     );
+    const crew = CREWS[index % CREWS.length];
     return {
       rank: 0,
       videoId: `mock-${index}`,
       title: `[KPOP IN PUBLIC] ${group} - '${songs[index % songs.length]}' Dance Cover in ${spots[index % spots.length]}`,
       channelTitle: `${group} Dance Crew`,
+      channelId: crew?.channelId ?? "",
+      country: crew?.country ?? null,
       thumbnailUrl: `https://picsum.photos/seed/kpop-${index}/480/270`,
       viewCount,
       publishedAt: publishedAt.toISOString(),
@@ -211,17 +279,19 @@ export async function getWeeklyRankings(): Promise<RankingsResult> {
       videos: buildMockVideos(),
       weekStart: weekStart.toISOString(),
       weekEnd: weekEnd.toISOString(),
+      crewCount: CREWS.length,
       source: "mock",
       generatedAt: new Date().toISOString(),
     };
   }
 
-  const videos = await fetchFromYouTube(apiKey);
+  const videos = await fetchFromCrewRoster(apiKey);
 
   return {
     videos,
     weekStart: weekStart.toISOString(),
     weekEnd: weekEnd.toISOString(),
+    crewCount: CREWS.length,
     source: "youtube-api",
     generatedAt: new Date().toISOString(),
   };

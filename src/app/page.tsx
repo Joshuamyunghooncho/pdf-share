@@ -13,6 +13,14 @@ function formatDate(iso: string) {
   }).format(new Date(iso));
 }
 
+function countryFlag(countryCode: string | null) {
+  if (!countryCode || countryCode.length !== 2) return null;
+  const codePoints = [...countryCode.toUpperCase()].map(
+    (char) => 0x1f1a5 + char.charCodeAt(0)
+  );
+  return String.fromCodePoint(...codePoints);
+}
+
 const RANK_STYLES: Record<number, string> = {
   1: "bg-gradient-to-br from-yellow-300 to-yellow-500 text-yellow-950",
   2: "bg-gradient-to-br from-zinc-200 to-zinc-400 text-zinc-900",
@@ -20,20 +28,22 @@ const RANK_STYLES: Record<number, string> = {
 };
 
 export default async function Home() {
-  const { videos, weekStart, weekEnd, source } = await getWeeklyRankings();
+  const { videos, weekStart, weekEnd, source, crewCount } =
+    await getWeeklyRankings();
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-50">
       <div className="mx-auto max-w-3xl px-4 py-10 sm:px-6">
         <header className="mb-8 text-center">
           <p className="text-sm font-medium tracking-widest text-pink-400 uppercase">
-            Weekly Chart
+            Weekly Chart · Registered Crews
           </p>
           <h1 className="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">
             KPOP IN PUBLIC 조회수 랭킹
           </h1>
           <p className="mt-3 text-sm text-zinc-400">
-            {formatDate(weekStart)} – {formatDate(weekEnd)} 업로드 영상 기준
+            {formatDate(weekStart)} – {formatDate(weekEnd)} 업로드 영상 기준 ·
+            등록 크루 {crewCount}팀 대상
           </p>
         </header>
 
@@ -80,6 +90,9 @@ export default async function Home() {
                       {video.title}
                     </p>
                     <p className="mt-1 truncate text-xs text-zinc-400 sm:text-sm">
+                      {countryFlag(video.country) && (
+                        <span className="mr-1">{countryFlag(video.country)}</span>
+                      )}
                       {video.channelTitle} · {formatDate(video.publishedAt)}
                     </p>
                   </div>
@@ -97,8 +110,9 @@ export default async function Home() {
         )}
 
         <footer className="mt-10 text-center text-xs text-zinc-600">
-          매시간 자동 갱신 · &quot;kpop in public&quot; 검색어로 최근 7일 내
-          업로드된 영상을 조회수 순으로 정렬합니다.
+          매시간 자동 갱신 · 전 세계 &quot;kpop in public&quot; 크루 {crewCount}
+          팀의 최근 7일 업로드 영상만을 대상으로, 조회수 순으로 정렬합니다.
+          임의 검색 결과가 아닌 등록된 채널만 집계해 신뢰도를 높였습니다.
         </footer>
       </div>
     </div>
